@@ -5,6 +5,11 @@ THIS_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
 CURRENT_DIRECTORY := $(abspath $(dir $(THIS_MAKEFILE)))
 include $(dir $(abspath $(lastword $(MAKEFILE_LIST))))/../../libraries/config/templates/stratosphere.mk
 
+# Keep the full-resolution splash and Nexus modules within package3's fixed
+# KIP region. Only boot uses size optimization; USB modules retain -O2.
+ATMOSPHERE_OPTIMIZATION_FLAG := -Os
+CFLAGS += -flto
+
 ATMOSPHERE_SYSTEM_MODULE_TARGETS := kip
 
 #---------------------------------------------------------------------------------

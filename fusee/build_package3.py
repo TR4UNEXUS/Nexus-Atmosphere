@@ -131,6 +131,8 @@ def write_kips(f, all_kips):
             tot += 0xF
             tot &= ~0xF
     # Pad to 3 MB
+    if tot > 0x300000:
+        raise ValueError('KIP region exceeds package3 capacity by %d bytes' % (tot - 0x300000))
     f.write(b'\xCC' * (0x300000 - tot))
 
 def main(argc, argv):
@@ -164,6 +166,10 @@ def main(argc, argv):
     rebootstub   = read_file(os.path.join(ams_dir, 'exosphere/program/rebootstub/%s/rebootstub.bin' % build_boot_out_dir))
     mesosphere   = read_file(os.path.join(ams_dir, 'mesosphere/%s/mesosphere.bin' % build_out_dir))
     all_kips     = get_kips(ams_dir, build_out_dir)
+    emummc, kips = all_kips
+    kip_bytes = sum((len(kip) + 0xF) & ~0xF for kip in [emummc] + [kips[name] for name in KIP_NAMES])
+    if kip_bytes > 0x300000:
+        raise ValueError('KIP region exceeds package3 capacity by %d bytes; output was not written' % (kip_bytes - 0x300000))
     tsec_keygen  = read_file(os.path.join(ams_dir, 'fusee/program/tsec_keygen/tsec_keygen.bin'))
     splash_bin   = read_file(os.path.join(ams_dir, 'img/splash.bin'))
     assert len(splash_bin) == 0x3C0000
@@ -185,8 +191,10 @@ def main(argc, argv):
         # Write mesosphere
         f.write(pad(mesosphere, 0xAA000))
         # Write kips
+        assert f.tell() == 0x100000
         write_kips(f, all_kips)
         # Write Splash Screen
+        assert f.tell() == 0x400000
         f.write(splash_bin)
         # Write fusee
         f.write(pad(fusee_bin, 0x20000))
@@ -194,6 +202,7 @@ def main(argc, argv):
         f.write(pad(rebootstub, 0x1000))
         # Pad to 8 MB
         f.write(b'\xCC' * (0x800000 - 0x7E1000))
+        assert f.tell() == 0x800000
 
 
     return 0
