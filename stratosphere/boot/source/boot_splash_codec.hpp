@@ -1,4 +1,4 @@
-/* Lossless CNX splash reconstruction. Distributed under GPL-2.0 with Atmosphere. */
+/* Lossless Nexus splash reconstruction. Distributed under GPL-2.0 with Atmosphere. */
 #pragma once
 #include <cstddef>
 #include <cstdint>
