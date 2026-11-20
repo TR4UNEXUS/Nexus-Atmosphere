@@ -296,6 +296,7 @@ namespace ams::dmnt::cheat::impl {
             size_t m_instruction_ptr = 0;
             size_t m_condition_depth = 0;
             bool m_decode_success = false;
+            Result m_execution_result = ResultSuccess();
             u32 m_program[MaximumProgramOpcodeCount] = {0};
             u64 m_registers[NumRegisters] = {0};
             u64 m_saved_values[NumRegisters] = {0};
@@ -322,6 +323,10 @@ namespace ams::dmnt::cheat::impl {
 
             size_t GetProgramSize() {
                 return m_num_opcodes;
+            }
+
+            Result GetExecutionResult() const {
+                return m_execution_result;
             }
 
             bool LoadProgram(const CheatEntry *cheats, size_t num_cheats);

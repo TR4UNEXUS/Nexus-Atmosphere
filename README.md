@@ -1,10 +1,10 @@
 # Nexus Atmosphere
 
-The complete firmware source for **Nexus Atmosphere 1.12.2 N1**, including USB storage, game-content routing, content database changes and Loader integration.
+The complete firmware source for **Nexus Atmosphere 1.12.2 N4R2**, including USB storage, game-content routing, content database changes and Loader integration.
 
-This source snapshot includes the U2 SD installation fix, explicit USB installation commands, the SL7 sleep/wake recovery work and the paged content database. SD and internal-storage installations keep their selected destination when a USB drive is connected.
+This source snapshot includes the compressed game-data read fix, paged USB mapping and console-side mapping backup, USB-to-USB install fixes, cheat-service protections and boot-module isolation. It also includes the U2 SD installation fix, explicit USB installation commands, the SL7 sleep/wake recovery work and the paged content database. SD and internal-storage installations keep their selected destination when a USB drive is connected.
 
-The updated base includes support code for system version 23.5.0, the Nexus splash screens, the USB-only Loader and the matching HOC 2.6.0 Loader source. The Nintendo blocking files used by the packs are included under `extras/nexus-sd`. See [what changed](CHANGELOG-NEXUS.md).
+The updated base includes support code for system version 23.5.0, the original Atmosphere splash, the USB-only Loader and the matching HOC 2.6.0 Loader source. The Nintendo blocking files used by the packs are included under `extras/nexus-sd`. See [what changed](CHANGELOG-NEXUS.md).
 
 ## Where to start
 
@@ -28,6 +28,8 @@ The updated base includes support code for system version 23.5.0, the Nexus spla
 | `extras/nexus-sd` | Nintendo DNS blocking files for both CFW boot modes |
 
 USB support spans several firmware modules. Build the core and the selected Loader from the same checkout. The current HOC pack uses the combined HOC 2.6.0 Loader; the earlier HS2 separation experiment remains available for development.
+
+The no-HOC N4R2 build was tested with Silksong reaching gameplay. The matching HOC Loader was rebuilt and checked, but has not had the same console test yet. This does not establish compatibility with every game or system module.
 
 This is a source release. Generated firmware, console data and private keys are not included. Hardware compatibility still needs testing across different drives and games.
 

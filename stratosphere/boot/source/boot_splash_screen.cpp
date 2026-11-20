@@ -17,8 +17,6 @@
 #include "boot_boot_reason.hpp"
 #include "boot_display.hpp"
 #include "boot_splash_screen.hpp"
-#include "boot_splash_codec.hpp"
-#include "boot_splash_zstd.hpp"
 
 namespace ams::boot {
 
@@ -26,11 +24,7 @@ namespace ams::boot {
 
 /* Include splash screen into anonymous namespace. */
 /* TODO: Compile-time switch for splash_screen_text.hpp? */
-#include "boot_splash_zstd.inc"
-        /* BSS replaces the original raw read-only bitmap. Never use the 20 KiB boot heap. */
-        constinit u32 g_splash_pixels[SplashScreenW * SplashScreenH] = {};
-        constinit u8 g_splash_scratch[SplashScratchSize] = {};
-        alignas(8) constinit u8 g_splash_workspace[splash::ZstdWorkspaceSize] = {};
+#include "boot_splash_screen_notext.inc"
 
     }
 
@@ -40,20 +34,11 @@ namespace ams::boot {
             return;
         }
 
-        /* A damaged embedded splash must not prevent the console from booting. */
-        if (!splash::Decode(g_splash_pixels, SplashScreenW * SplashScreenH, SplashScreenW,
-                            g_splash_scratch, SplashScratchSize,
-                            SplashCompressed, sizeof(SplashCompressed),
-                            SplashBlocks, sizeof(SplashBlocks)/sizeof(SplashBlocks[0]),
-                            splash::ZstdDecompressor{g_splash_workspace, sizeof(g_splash_workspace),
-                                g_splash_scratch, sizeof(g_splash_scratch), SplashScratchSize})) {
-            return;
-        }
         InitializeDisplay();
         {
             /* Splash screen is shown for 2 seconds. */
-            ShowDisplay(SplashScreenX, SplashScreenY, SplashScreenW, SplashScreenH, g_splash_pixels);
-            os::SleepThread(TimeSpan::FromSeconds(4));
+            ShowDisplay(SplashScreenX, SplashScreenY, SplashScreenW, SplashScreenH, SplashScreen);
+            os::SleepThread(TimeSpan::FromSeconds(2));
         }
         FinalizeDisplay();
     }

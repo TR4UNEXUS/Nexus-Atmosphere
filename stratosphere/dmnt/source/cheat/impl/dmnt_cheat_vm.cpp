@@ -722,7 +722,12 @@ namespace ams::dmnt::cheat::impl {
             /* Skipping, but m_condition_depth = 0. */
             /* This is an error condition. */
             /* This could occur with a mismatched "else" opcode, for example. */
-            R_ABORT_UNLESS(ResultVirtualMachineInvalidConditionDepth());
+            /* Stop this loaded program until the user changes/reloads cheats.
+             * A malformed else instruction must not take down dmnt. */
+            m_execution_result = ResultVirtualMachineInvalidConditionDepth();
+            m_decode_success = false;
+            m_instruction_ptr = m_num_opcodes;
+            m_num_opcodes = 0;
         }
     }
 
@@ -770,8 +775,9 @@ namespace ams::dmnt::cheat::impl {
     }
 
     bool CheatVirtualMachine::LoadProgram(const CheatEntry *cheats, size_t num_cheats) {
-        /* Reset opcode count. */
+        /* Reset opcode count and any previous program error. */
         m_num_opcodes = 0;
+        m_execution_result = ResultSuccess();
 
         for (size_t i = 0; i < num_cheats; i++) {
             if (cheats[i].enabled) {

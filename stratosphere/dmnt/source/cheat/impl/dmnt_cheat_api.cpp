@@ -22,6 +22,38 @@ namespace ams::dmnt::cheat::impl {
 
     namespace {
 
+        /* Best-effort, bounded diagnostics. Never turn a logging error into a fatal. */
+        void LogCheatEvent(const char *stage, Result result, const CheatProcessMetadata &metadata) {
+            constexpr const char *Path = "sdmc:/atmosphere/logs/nexus_cheats.log";
+            constexpr s64 MaxLogSize = 64 * 1024;
+            if (R_FAILED(fs::EnsureDirectory("sdmc:/atmosphere/logs"))) {
+                return;
+            }
+            R_DISCARD(fs::CreateFile(Path, 0));
+            fs::FileHandle file;
+            if (R_FAILED(fs::OpenFile(std::addressof(file), Path, fs::OpenMode_Write | fs::OpenMode_AllowAppend))) {
+                return;
+            }
+            ON_SCOPE_EXIT { fs::CloseFile(file); };
+            s64 offset = 0;
+            if (R_FAILED(fs::GetFileSize(std::addressof(offset), file)) || offset < 0) {
+                return;
+            }
+            char line[256];
+            util::SNPrintf(line, sizeof(line), "NEXUS-N3 stage=%s result=%08x title=%016lx pid=%016lx build=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                stage, result.GetValue(), metadata.program_id.value, metadata.process_id.value,
+                metadata.main_nso_module_id[0], metadata.main_nso_module_id[1], metadata.main_nso_module_id[2], metadata.main_nso_module_id[3],
+                metadata.main_nso_module_id[4], metadata.main_nso_module_id[5], metadata.main_nso_module_id[6], metadata.main_nso_module_id[7]);
+            const size_t size = std::strlen(line);
+            if (offset + static_cast<s64>(size) > MaxLogSize) {
+                if (R_FAILED(fs::SetFileSize(file, 0))) {
+                    return;
+                }
+                offset = 0;
+            }
+            R_DISCARD(fs::WriteFile(file, offset, line, size, fs::WriteOption::Flush));
+        }
+
         /* Helper definitions. */
         constexpr size_t MaxCheatCount = 0x80;
         constexpr size_t MaxFrozenAddressCount = 0x80;
@@ -174,7 +206,7 @@ namespace ams::dmnt::cheat::impl {
                     return nullptr;
                 }
 
-                void CloseActiveCheatProcess() {
+                void CloseActiveCheatProcess(bool save_toggles = true) {
                     if (m_cheat_process_debug_handle != os::InvalidNativeHandle) {
                         /* We don't need to do any unsafe brekaing. */
                         m_broken_unsafe = false;
@@ -192,10 +224,10 @@ namespace ams::dmnt::cheat::impl {
                         m_cheat_process_debug_handle = os::InvalidNativeHandle;
 
                         /* Save cheat toggles. */
-                        if (m_always_save_cheat_toggles || m_should_save_cheat_toggles) {
+                        if (save_toggles && (m_always_save_cheat_toggles || m_should_save_cheat_toggles)) {
                             this->SaveCheatToggles(m_cheat_process_metadata.program_id);
-                            m_should_save_cheat_toggles = false;
                         }
+                        m_should_save_cheat_toggles = false;
 
                         /* Clear metadata. */
                         static_assert(util::is_pod<decltype(m_cheat_process_metadata)>::value, "CheatProcessMetadata definition!");
@@ -249,9 +281,6 @@ namespace ams::dmnt::cheat::impl {
                     return h;
                 }
 
-                void StartProcess(os::ProcessId process_id) const {
-                    R_ABORT_UNLESS(pm::dmnt::StartProcess(process_id));
-                }
             public:
                 CheatProcessManager() : m_cheat_lock(), m_unsafe_break_event(os::EventClearMode_ManualClear), m_debug_events_event(os::EventClearMode_AutoClear), m_cheat_process_event(os::EventClearMode_AutoClear, true) {
                     /* Learn whether we should enable cheats by default. */
@@ -716,12 +745,18 @@ namespace ams::dmnt::cheat::impl {
 
                             /* Handle any pending debug events. */
                             if (manager->HasActiveCheatProcess()) {
-                                R_TRY_CATCH(dmnt::cheat::impl::ContinueCheatProcess(manager->GetCheatProcessHandle())) {
-                                    R_CATCH(svc::ResultProcessTerminated) {
-                                        manager->CloseActiveCheatProcess();
-                                        break;
+                                const Result rc = dmnt::cheat::impl::ContinueCheatProcess(manager->GetCheatProcessHandle());
+                                if (R_FAILED(rc)) {
+                                    const bool terminated = svc::ResultProcessTerminated::Includes(rc);
+                                    const auto metadata = manager->m_cheat_process_metadata;
+                                    /* Detach first; don't leave the game stopped while writing a log.
+                                     * Preserve toggle files when debugging fails unexpectedly. */
+                                    manager->CloseActiveCheatProcess(terminated);
+                                    if (!terminated) {
+                                        LogCheatEvent("continue-debug", rc, metadata);
                                     }
-                                } R_END_TRY_CATCH_WITH_ABORT_UNLESS;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -751,6 +786,9 @@ namespace ams::dmnt::cheat::impl {
                             /* Execute program only if it has opcodes. */
                             if (manager->m_cheat_vm.GetProgramSize()) {
                                 manager->m_cheat_vm.Execute(std::addressof(manager->m_cheat_process_metadata));
+                                if (R_FAILED(manager->m_cheat_vm.GetExecutionResult())) {
+                                    LogCheatEvent("vm-conditional", manager->m_cheat_vm.GetExecutionResult(), manager->m_cheat_process_metadata);
+                                }
                             }
                         }
 
@@ -773,13 +811,6 @@ namespace ams::dmnt::cheat::impl {
             }
         }
 
-        #define R_ABORT_UNLESS_IF_NEW_PROCESS(res) \
-            if (on_process_launch) { \
-                R_ABORT_UNLESS(res); \
-            } else { \
-                R_TRY(res); \
-            }
-
         Result CheatProcessManager::AttachToApplicationProcess(bool on_process_launch) {
             std::scoped_lock lk(m_cheat_lock);
 
@@ -794,13 +825,37 @@ namespace ams::dmnt::cheat::impl {
                 this->CloseActiveCheatProcess();
             }
 
-            /* Get the application process's ID. */
-            R_ABORT_UNLESS_IF_NEW_PROCESS(pm::dmnt::GetApplicationProcessId(std::addressof(m_cheat_process_metadata.process_id)));
-            auto proc_guard = SCOPE_GUARD {
-                if (on_process_launch) {
-                    this->StartProcess(m_cheat_process_metadata.process_id);
+            /* Publish metadata only after attachment succeeds. On a failed automatic
+             * attachment, release the launch hook so the game can run without cheats. */
+            CheatProcessMetadata metadata = {};
+            Result failure = ResultSuccess();
+            const char *failure_stage = nullptr;
+            auto Check = [&](Result result, const char *stage) -> Result {
+                if (R_FAILED(result)) {
+                    failure = result;
+                    failure_stage = stage;
                 }
-                m_cheat_process_metadata.process_id = os::ProcessId{};
+                return result;
+            };
+            ON_SCOPE_EXIT {
+                if (failure_stage != nullptr) {
+                    LogCheatEvent(failure_stage, failure, metadata);
+                }
+            };
+
+            /* Get the application process's ID. */
+            R_TRY(Check(pm::dmnt::GetApplicationProcessId(std::addressof(metadata.process_id)), "get-process"));
+            bool start_attempted = false;
+            auto proc_guard = SCOPE_GUARD {
+                if (on_process_launch && !start_attempted) {
+                    /* Resume before attempting any SD diagnostic writes. */
+                    const Result rc = pm::dmnt::StartProcess(metadata.process_id);
+                    if (R_FAILED(rc)) {
+                        LogCheatEvent("resume-without-cheats", rc, metadata);
+                    }
+                }
+                this->ResetAllCheatEntries();
+                m_should_save_cheat_toggles = false;
             };
 
             /* Get process handle, use it to learn memory extents. */
@@ -809,17 +864,17 @@ namespace ams::dmnt::cheat::impl {
                 ncm::ProgramLocation loc = {};
                 cfg::OverrideStatus status = {};
 
-                R_ABORT_UNLESS_IF_NEW_PROCESS(pm::dmnt::AtmosphereGetProcessInfo(std::addressof(proc_h), std::addressof(loc), std::addressof(status), m_cheat_process_metadata.process_id));
+                R_TRY(Check(pm::dmnt::AtmosphereGetProcessInfo(std::addressof(proc_h), std::addressof(loc), std::addressof(status), metadata.process_id), "process-info"));
                 ON_SCOPE_EXIT { os::CloseNativeHandle(proc_h); };
 
-                m_cheat_process_metadata.program_id = loc.program_id;
+                metadata.program_id = loc.program_id;
 
-                R_ABORT_UNLESS(svc::GetInfo(std::addressof(m_cheat_process_metadata.heap_extents.base),  svc::InfoType_HeapRegionAddress,  proc_h, 0));
-                R_ABORT_UNLESS(svc::GetInfo(std::addressof(m_cheat_process_metadata.heap_extents.size),  svc::InfoType_HeapRegionSize,     proc_h, 0));
-                R_ABORT_UNLESS(svc::GetInfo(std::addressof(m_cheat_process_metadata.alias_extents.base), svc::InfoType_AliasRegionAddress, proc_h, 0));
-                R_ABORT_UNLESS(svc::GetInfo(std::addressof(m_cheat_process_metadata.alias_extents.size), svc::InfoType_AliasRegionSize,    proc_h, 0));
-                R_ABORT_UNLESS(svc::GetInfo(std::addressof(m_cheat_process_metadata.aslr_extents.base),  svc::InfoType_AslrRegionAddress,  proc_h, 0));
-                R_ABORT_UNLESS(svc::GetInfo(std::addressof(m_cheat_process_metadata.aslr_extents.size),  svc::InfoType_AslrRegionSize,     proc_h, 0));
+                R_TRY(Check(svc::GetInfo(std::addressof(metadata.heap_extents.base),  svc::InfoType_HeapRegionAddress,  proc_h, 0), "memory-info"));
+                R_TRY(Check(svc::GetInfo(std::addressof(metadata.heap_extents.size),  svc::InfoType_HeapRegionSize,     proc_h, 0), "memory-info"));
+                R_TRY(Check(svc::GetInfo(std::addressof(metadata.alias_extents.base), svc::InfoType_AliasRegionAddress, proc_h, 0), "memory-info"));
+                R_TRY(Check(svc::GetInfo(std::addressof(metadata.alias_extents.size), svc::InfoType_AliasRegionSize,    proc_h, 0), "memory-info"));
+                R_TRY(Check(svc::GetInfo(std::addressof(metadata.aslr_extents.base),  svc::InfoType_AslrRegionAddress,  proc_h, 0), "memory-info"));
+                R_TRY(Check(svc::GetInfo(std::addressof(metadata.aslr_extents.size),  svc::InfoType_AslrRegionSize,     proc_h, 0), "memory-info"));
 
                 /* If new process launch, we may not want to actually attach. */
                 if (on_process_launch) {
@@ -833,7 +888,7 @@ namespace ams::dmnt::cheat::impl {
                 s32 num_modules;
 
                 /* TODO: ldr::dmnt:: */
-                R_ABORT_UNLESS_IF_NEW_PROCESS(ldrDmntGetProcessModuleInfo(static_cast<u64>(m_cheat_process_metadata.process_id), reinterpret_cast<LoaderModuleInfo *>(proc_modules), util::size(proc_modules), std::addressof(num_modules)));
+                R_TRY(Check(ldrDmntGetProcessModuleInfo(static_cast<u64>(metadata.process_id), reinterpret_cast<LoaderModuleInfo *>(proc_modules), util::size(proc_modules), std::addressof(num_modules)), "module-info"));
 
                 /* All applications must have two modules. */
                 /* Only accept one (which means we're attaching to HBL) */
@@ -847,47 +902,43 @@ namespace ams::dmnt::cheat::impl {
                     R_THROW(dmnt::cheat::ResultCheatNotAttached());
                 }
 
-                m_cheat_process_metadata.main_nso_extents.base = proc_module->address;
-                m_cheat_process_metadata.main_nso_extents.size = proc_module->size;
-                std::memcpy(m_cheat_process_metadata.main_nso_module_id, proc_module->module_id, sizeof(m_cheat_process_metadata.main_nso_module_id));
+                metadata.main_nso_extents.base = proc_module->address;
+                metadata.main_nso_extents.size = proc_module->size;
+                std::memcpy(metadata.main_nso_module_id, proc_module->module_id, sizeof(metadata.main_nso_module_id));
             }
 
             /* Read cheats off the SD. */
-            if (!this->LoadCheats(m_cheat_process_metadata.program_id, m_cheat_process_metadata.main_nso_module_id) ||
-                !this->LoadCheatToggles(m_cheat_process_metadata.program_id)) {
+            if (!this->LoadCheats(metadata.program_id, metadata.main_nso_module_id) ||
+                !this->LoadCheatToggles(metadata.program_id)) {
+                /* Never leave a partially parsed program active on a manual attach. */
+                this->ResetAllCheatEntries();
+                m_should_save_cheat_toggles = false;
                 /* If new process launch, require success. */
                 R_UNLESS(!on_process_launch, dmnt::cheat::ResultCheatNotAttached());
             }
 
-            /* Open a debug handle. */
+            /* A per-game debugger conflict must not abort the system module. */
             svc::Handle debug_handle = svc::InvalidHandle;
-            R_ABORT_UNLESS_IF_NEW_PROCESS(svc::DebugActiveProcess(std::addressof(debug_handle), m_cheat_process_metadata.process_id.value));
+            R_TRY(Check(svc::DebugActiveProcess(std::addressof(debug_handle), metadata.process_id.value), "debug-attach"));
+            auto debug_guard = SCOPE_GUARD { os::CloseNativeHandle(debug_handle); };
 
-            /* Set our debug handle. */
-            m_cheat_process_debug_handle = debug_handle;
-
-            /* Cancel process guard. */
-            proc_guard.Cancel();
-
-            /* Reset broken state. */
-            m_broken_unsafe = false;
-            m_unsafe_break_event.Signal();
-
-            /* If new process, start the process. */
             if (on_process_launch) {
-                this->StartProcess(m_cheat_process_metadata.process_id);
+                start_attempted = true;
+                R_TRY(Check(pm::dmnt::StartProcess(metadata.process_id), "start-attached"));
             }
 
-            /* Signal to the debug events thread. */
+            /* Transfer ownership only after the game is ready to run. */
+            m_cheat_process_metadata = metadata;
+            m_cheat_process_debug_handle = debug_handle;
+            debug_guard.Cancel();
+            proc_guard.Cancel();
+            m_broken_unsafe = false;
+            m_unsafe_break_event.Signal();
             m_debug_events_event.Signal();
-
-            /* Signal to our fans. */
             m_cheat_process_event.Signal();
-
+            LogCheatEvent("attached", ResultSuccess(), metadata);
             R_SUCCEED();
         }
-
-        #undef R_ABORT_UNLESS_IF_NEW_PROCESS
 
         bool CheatProcessManager::ParseCheats(const char *s, size_t len) {
             /* Trigger a VM reload. */
@@ -909,15 +960,15 @@ namespace ams::dmnt::cheat::impl {
 
                     /* Extract name bounds. */
                     size_t j = i + 1;
-                    while (s[j] != ']') {
+                    while (j < len && s[j] != ']') {
                         j++;
-                        if (j >= len) {
-                            return false;
-                        }
+                    }
+                    if (j == len) {
+                        return false;
                     }
 
                     /* s[i+1:j] is cheat name. */
-                    const size_t cheat_name_len = std::min(j - i - 1, sizeof(cur_entry->definition.readable_name));
+                    const size_t cheat_name_len = std::min(j - i - 1, sizeof(cur_entry->definition.readable_name) - 1);
                     std::memcpy(cur_entry->definition.readable_name, s + (i + 1), cheat_name_len);
                     cur_entry->definition.readable_name[cheat_name_len] = 0;
 
@@ -934,15 +985,15 @@ namespace ams::dmnt::cheat::impl {
 
                     /* Extract name bounds */
                     size_t j = i + 1;
-                    while (s[j] != '}') {
+                    while (j < len && s[j] != '}') {
                         j++;
-                        if (j >= len) {
-                            return false;
-                        }
+                    }
+                    if (j == len) {
+                        return false;
                     }
 
                     /* s[i+1:j] is cheat name. */
-                    const size_t cheat_name_len = std::min(j - i - 1, sizeof(cur_entry->definition.readable_name));
+                    const size_t cheat_name_len = std::min(j - i - 1, sizeof(cur_entry->definition.readable_name) - 1);
                     memcpy(cur_entry->definition.readable_name, s + (i + 1), cheat_name_len);
                     cur_entry->definition.readable_name[cheat_name_len] = 0;
 
@@ -1007,15 +1058,15 @@ namespace ams::dmnt::cheat::impl {
                 } else if (s[i] == '[') {
                     /* Extract name bounds. */
                     size_t j = i + 1;
-                    while (s[j] != ']') {
+                    while (j < len && s[j] != ']') {
                         j++;
-                        if (j >= len) {
-                            return false;
-                        }
+                    }
+                    if (j == len) {
+                        return false;
                     }
 
                     /* s[i+1:j] is cheat name. */
-                    const size_t cheat_name_len = std::min(j - i - 1, sizeof(cur_cheat_name));
+                    const size_t cheat_name_len = std::min(j - i - 1, sizeof(cur_cheat_name) - 1);
                     std::memcpy(cur_cheat_name, s + (i + 1), cheat_name_len);
                     cur_cheat_name[cheat_name_len] = 0;
 
@@ -1023,11 +1074,11 @@ namespace ams::dmnt::cheat::impl {
                     i = j + 1;
 
                     /* Skip whitespace. */
-                    while (std::isspace(static_cast<unsigned char>(s[i]))) {
+                    while (i < len && std::isspace(static_cast<unsigned char>(s[i]))) {
                         i++;
-                        if (i >= len) {
-                            return false;
-                        }
+                    }
+                    if (i == len) {
+                        return false;
                     }
 
                     /* Parse whether to toggle. */

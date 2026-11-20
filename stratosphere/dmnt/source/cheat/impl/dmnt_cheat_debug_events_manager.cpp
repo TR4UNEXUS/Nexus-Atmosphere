@@ -60,9 +60,8 @@ namespace ams::dmnt::cheat::impl {
                         u64 out64 = 0;
                         u32 out32 = 0;
 
-                        R_TRY_CATCH(svc::GetDebugThreadParam(&out64, &out32, debug_handle, dbg_event.info.create_thread.thread_id, svc::DebugThreadParam_CurrentCore)) {
-                            R_CATCH_RETHROW(svc::ResultProcessTerminated)
-                        } R_END_TRY_CATCH_WITH_ABORT_UNLESS;
+                        R_TRY(svc::GetDebugThreadParam(&out64, &out32, debug_handle, dbg_event.info.create_thread.thread_id, svc::DebugThreadParam_CurrentCore));
+                        R_UNLESS(out32 < NumCores, svc::ResultInvalidState());
 
                         target_core = out32;
                     }
