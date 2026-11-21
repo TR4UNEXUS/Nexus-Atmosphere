@@ -1,10 +1,6 @@
-# Building Nexus Atmosphere
+# Building Nexus Atmosphere HS3R1
 
-Use Linux or WSL with the devkitPro Switch and ARM toolchains, GNU Make, Git, Python 3 and zip. The source needs devkitA64, devkitARM, libnx, deko3d and the Switch build tools, including uam. Install these through devkitPro; do not copy a toolchain from another application project.
-
-The 1.12.2 N4R2 firmware was compiled with GCC 15.2.0 for both ARM toolchains. Use matching headers and libraries from the same SDK installation. After cloning, `sh scripts/build-nexus.sh` builds the core with the USB-only Loader. Set `LIBNX` and `PORTLIBS` if using a separate SDK prefix, and `JOBS` to change the parallel build count.
-
-Clone this repository with Git so the version macros have a commit ID:
+Use Linux or WSL, Git, Python 3, GNU Make and the devkitPro Switch/ARM toolchains: devkitA64, devkitARM, libnx, deko3d and Switch build tools including uam. The release build used GCC 15.2.0 for both ARM toolchains. Keep SDK headers and libraries from a matching installation; do not reuse objects from another revision.
 
 ```sh
 git clone https://github.com/TR4UNEXUS/Nexus-Atmosphere.git
@@ -12,31 +8,65 @@ cd Nexus-Atmosphere
 export DEVKITPRO=/opt/devkitpro
 export DEVKITA64="$DEVKITPRO/devkitA64"
 export DEVKITARM="$DEVKITPRO/devkitARM"
+export LIBNX="$DEVKITPRO/libnx"
+export PORTLIBS="$DEVKITPRO/portlibs/switch"
 export PATH="$DEVKITPRO/tools/bin:$DEVKITA64/bin:$DEVKITARM/bin:$PATH"
-make -j2 nx_release
+JOBS=4 sh scripts/build-nexus.sh
 ```
 
-The normal target builds `package3`, Fusee and the companion modules from source. Outputs are under the individual component `out` directories; `fusee/out/nintendo_nx_arm_armv4t/release/package3` is the assembled core. `make -j2 dist-no-debug-nx_release` creates the upstream-style distribution after the build. This does not recreate a HATS pack or supply Hekate and other separately distributed applications.
+The core target builds all required modules, including the separate Nexus Loader. To rebuild just that Loader, use `sh scripts/build-nexus.sh loader`. The wrapper supplies version macros for Git checkouts; output hashes will differ from the original workstation build as build paths, commit IDs and compiler inputs change.
 
-The current code was developed with project-specific build caches. This public layout restores the source resources and removes those cache dependencies. A successful host test alone is not a complete clean cross-build or an on-console test; report compiler/version details with build failures. Do not mix objects or libraries from different source revisions.
+Outputs needed for both variants:
 
-## Loader variants
+- `fusee/out/nintendo_nx_arm_armv4t/release/package3` → `atmosphere/package3`
+- `stratosphere/nexus_loader/out/nintendo_nx_arm64_armv8a/release/nexus_loader.kip` → `atmosphere/kips/nexus-loader.kip`
 
-The main tree contains the USB-only Loader. After building the core, run `sh scripts/build-nexus.sh hoc` to build the current combined HOC 2.6.0 Loader from `optional/loader-hoc-2.6.0`. Its output is `optional/loader-hoc-2.6.0/out/nintendo_nx_arm64_armv8a/release/loader.kip`. The source carries generic HOC defaults; the release pack's existing overclock settings were retained separately when the pack was assembled.
+Verify the output filename from the build before packaging. A normal Atmosphere distribution target alone does not assemble a complete Nexus HATS pack.
 
-`optional/loader-no-hoc`, `optional/loader-hoc` and `optional/hoc` preserve the older HS2 separation experiment. Read [the optional HOC notes](optional/hoc/README-NEXUS.md) before working on that experiment. These are historical alternatives, not the Loader selection for this release.
+## HOC and No-HOC
 
-## Files needed when assembling a pack
+Both packs use the same core and Nexus Loader. HOC is no longer compiled into the Nexus Loader. The HOC test pack adds the unchanged upstream [HOC 2.6.1 release](https://github.com/Horizon-OC/Horizon-OC/releases/tag/2.6.1), with its supporting files. The referenced `dist.zip` SHA-256 is `cd943d0c8f7c8454c1fa85b87a55f6ca3b7a7c78084f37183929bc76c13455a4`.
 
-Copy `extras/nexus-sd/atmosphere` to the SD card root for Nintendo DNS blocking. Enable `enable_dns_mitm = u8!0x1` in the `[atmosphere]` section of `atmosphere/config/system_settings.ini`, then restart fully into CFW. An existing `emummc_XXXX.txt` hosts file takes priority over the generic emuMMC file.
+Use a Hekate Launch entry with these lines alongside your existing emuMMC/sysMMC settings:
 
-The complete packs also include [sys-patch 1.6.3.0](https://github.com/impeeza/sys-patch/releases/tag/v1.6.3.0), [Ultrahand](https://github.com/ppkantorski/Ultrahand-Overlay), the Nexus USB Content overlay and notification settings and sounds. Current standard packs use official Hekate 6.5.5 / Nyx 1.9.5 appearance and the original Atmosphere splash. Those separate applications are not built by this repository. Include their boot flags, loader files and configuration when assembling a pack.
+```ini
+pkg3=atmosphere/package3
+kip1=atmosphere/kips/nexus-loader.kip
+```
 
-## Host tests
+For HOC, also include its supplied files and add:
 
-Python 3 and a host C++20 compiler are enough for the main routing checks:
+```ini
+kip1=atmosphere/kips/hoc.kip
+secmon=atmosphere/exosphere.bin
+```
+
+Do not use an old combined Nexus/HOC Loader with HS3R1. `optional/loader-hoc-2.6.0`, `optional/loader-no-hoc`, `optional/loader-hoc` and `optional/hoc` are historical source, not current build selections. Updating HOC no longer requires merging USB hooks, but the HOC version must still support the installed system firmware. Preserve the Nexus core, separate Loader and boot entry. Direct Fusee boot does not load the external Loader in this test setup.
+
+The original Loader can own HOC's clock patches while Nexus handles USB game loading. HS3R1 owns the single native `fsp-ldr` session in Nexus and proxies the backend's filesystem requests on a dedicated thread. See `stratosphere/nexus_loader`, `stratosphere/sm` and `ldr_nexus_routing.hpp` for the integration.
+
+## USB Content overlay
 
 ```sh
+make -C companions/usb-content-overlay -j4
+python3 companions/usb-content-overlay/tests/run.py
+```
+
+The UI dependency is included under `companions/horizon-oc-monitor-reference/lib/libultrahand`; unused reference-project include paths have been removed from the public Makefile. It does not depend on HOC at runtime. Copy the resulting `usb-content-status.ovl` to `switch/.overlays/`. See [the companion notes](companions/README.md).
+
+## Other pack components
+
+The standard packs use official Hekate 6.5.5 / Nyx 1.9.5 appearance and the original Atmosphere splash. Hekate, Ultrahand, overlay loader, notification assets, sys-patch 1.6.3.0 and Nexus Manager are distributed separately from the core build. Include their licences, configuration and boot flags when assembling a complete pack. Manager source is in [Nexus-Manager-Source](https://github.com/TR4UNEXUS/Nexus-Manager-Source).
+
+Copy `extras/nexus-sd/atmosphere` for the DNS hosts configuration and set `enable_dns_mitm = u8!0x1` under `[atmosphere]` in `atmosphere/config/system_settings.ini`. An existing `emummc_XXXX.txt` takes precedence over the generic emuMMC hosts file. Preserve users' USB maps and console data during upgrades.
+
+## Host checks and limits
+
+Run from this repository with Python 3, GCC/G++ and address/undefined-behaviour sanitizers:
+
+```sh
+python3 tests/nexus-integration/run_hs3_frontend_tests.py
+python3 tests/nexus-integration/run_hs3_sm_tests.py
 python3 tests/nexus-integration/run_compressed_read_tests.py
 python3 tests/nexus-integration/run_u2_registration_tests.py
 python3 tests/nexus-integration/run_u1_metadata_routing_tests.py
@@ -45,6 +75,4 @@ python3 tests/nexus-integration/run_db2_paged_tests.py
 python3 tests/nexus-integration/run_usb_sleep_tests.py --out build/host-tests/sleep
 ```
 
-These execute production logic with instrumented host backends. They do not emulate Horizon IPC, real USB transfers or physical power loss. Historical negative-control tools may require the older source revision passed explicitly.
-
-The compressed-read regression test compiles the actual production read lambda with the bundled LZ4 implementation. GCC/G++ with AddressSanitizer and UndefinedBehaviorSanitizer are required. It checks partial-buffer boundaries, mixed block types, empty reads and error propagation at -O0 and -O2.
+The new tests exercise production service methods with instrumented backends, including opaque pin ownership, error propagation, module queries, service aliases and a single filesystem session. They do not reproduce Horizon scheduling, physical USB removal, suspend/resume or every system-module combination. Full HS3R1 console validation remains pending; the N4R2 gameplay confirmation is not proof for this new architecture.

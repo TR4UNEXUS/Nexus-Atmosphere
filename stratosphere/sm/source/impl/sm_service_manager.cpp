@@ -15,6 +15,7 @@
  */
 #include <stratosphere.hpp>
 #include "sm_service_manager.hpp"
+#include <stratosphere/ldr/ldr_nexus_routing.hpp>
 #include "../sm_wait_list.hpp"
 
 namespace ams::hos {
@@ -346,6 +347,27 @@ namespace ams::sm::impl {
             return nullptr;
         }
 
+        u64 ServiceValue(ServiceName name) { u64 value; std::memcpy(&value,&name,sizeof(value)); return value; }
+        ServiceName ServiceFromValue(u64 value) { ServiceName name; std::memcpy(&name,&value,sizeof(name)); return name; }
+        bool HasNexusLoaderProcess() {
+            for (const auto &p:g_process_list)
+                if (p.program_id.value==ldr::nexus_routing::ProgramId && IsInitialProcess(p.process_id)) return true;
+            return false;
+        }
+        ServiceName ResolveLoaderService(ServiceName name,bool native_loader=false) {
+            return ServiceFromValue(ldr::nexus_routing::Lookup(ServiceValue(name),HasNexusLoaderProcess(),native_loader));
+        }
+        bool IsNexusLoaderOwner(os::ProcessId process_id) {
+            const auto *p=GetProcessInfo(process_id);
+            return p && p->program_id.value==ldr::nexus_routing::ProgramId && IsInitialProcess(process_id);
+        }
+
+        void ResumeServiceAndAliases(ServiceName service) {
+            TriggerResume(service);
+            const u64 wake=ldr::nexus_routing::WakeAlias(ServiceValue(service));
+            if (wake) TriggerResume(ServiceFromValue(wake));
+        }
+
         bool HasMitm(ServiceName service) {
             const ServiceInfo *service_info = GetServiceInfo(service);
             return service_info != nullptr && GetMitmInfo(service_info) != nullptr;
@@ -380,7 +402,7 @@ namespace ams::sm::impl {
             }
 
             /* This might undefer some requests. */
-            TriggerResume(service);
+            ResumeServiceAndAliases(service);
         }
 
         void GetMitmProcessInfo(MitmProcessInfo *out_info, os::ProcessId process_id) {
@@ -397,7 +419,8 @@ namespace ams::sm::impl {
         bool IsMitmDisallowed(ncm::ProgramId program_id) {
             /* Mitm used on certain programs can prevent the boot process from completing. */
             /* TODO: Is there a way to do this that's less hardcoded? Needs design thought. */
-            return program_id == ncm::SystemProgramId::Loader   ||
+            return program_id.value == ldr::nexus_routing::ProgramId ||
+                   program_id == ncm::SystemProgramId::Loader   ||
                    program_id == ncm::SystemProgramId::Pm       ||
                    program_id == ncm::SystemProgramId::Spl      ||
                    program_id == ncm::SystemProgramId::Boot     ||
@@ -498,8 +521,9 @@ namespace ams::sm::impl {
             free_service->max_sessions     = max_sessions;
             free_service->is_light         = is_light;
 
-            /* This might undefer some requests. */
-            TriggerResume(service);
+            /* Resume public clients when their independent loader is ready,
+             * and backend clients when the ordinary Loader registers. */
+            ResumeServiceAndAliases(service);
 
             R_SUCCEED();
         }
@@ -592,7 +616,7 @@ namespace ams::sm::impl {
         /* Validate service name. */
         R_TRY(ValidateServiceName(service));
 
-        *out = HasServiceInfo(service);
+        *out = HasServiceInfo(ResolveLoaderService(service));
         R_SUCCEED();
     }
 
@@ -623,6 +647,13 @@ namespace ams::sm::impl {
             R_UNLESS(proc != nullptr, sm::ResultInvalidClient());
             R_TRY(ValidateAccessControl(AccessControlEntry(proc->access_control, proc->access_control_size), service, false, false));
         }
+
+        /* Validate public ACLs before aliasing. Only the independent initial
+         * loader can address the unmodified stock/HOC backend directly. */
+        if (ldr::nexus_routing::IsBackendAlias(ServiceValue(service))) {
+            R_UNLESS(IsNexusLoaderOwner(process_id),sm::ResultNotAllowed());
+        }
+        service=ResolveLoaderService(service,IsNexusLoaderOwner(process_id));
 
         /* Get service info/mitm info. */
         ServiceInfo *service_info = GetServiceInfo(service);
@@ -704,7 +735,7 @@ namespace ams::sm::impl {
         R_TRY(ValidateServiceName(service));
 
         /* Get whether we have a mitm. */
-        *out = HasMitm(service);
+        *out = HasMitm(ResolveLoaderService(service));
 
         R_SUCCEED();
     }
@@ -736,6 +767,9 @@ namespace ams::sm::impl {
             R_UNLESS(proc != nullptr, sm::ResultInvalidClient());
             R_TRY(ValidateAccessControl(AccessControlEntry(proc->access_control, proc->access_control_size), service, true, false));
         }
+
+        R_UNLESS(!ldr::nexus_routing::IsBackendAlias(ServiceValue(service)),sm::ResultNotAllowed());
+        service=ResolveLoaderService(service);
 
         /* Validate that the service exists. */
         ServiceInfo *service_info = GetServiceInfo(service);
@@ -786,7 +820,7 @@ namespace ams::sm::impl {
             *out_query = qry_hnd;
 
             /* This might undefer some requests. */
-            TriggerResume(service);
+            ResumeServiceAndAliases(service);
         }
 
         R_SUCCEED();
@@ -804,6 +838,9 @@ namespace ams::sm::impl {
             ProcessInfo *proc = GetProcessInfo(process_id);
             R_UNLESS(proc != nullptr, sm::ResultInvalidClient());
         }
+
+        R_UNLESS(!ldr::nexus_routing::IsBackendAlias(ServiceValue(service)),sm::ResultNotAllowed());
+        service=ResolveLoaderService(service);
 
         /* Validate that the service exists. */
         ServiceInfo *service_info = GetServiceInfo(service);
@@ -847,6 +884,9 @@ namespace ams::sm::impl {
             R_TRY(ValidateAccessControl(AccessControlEntry(proc->access_control, proc->access_control_size), service, true, false));
         }
 
+        R_UNLESS(!ldr::nexus_routing::IsBackendAlias(ServiceValue(service)),sm::ResultNotAllowed());
+        service=ResolveLoaderService(service);
+
         /* Check that mitm hasn't already been registered or declared. */
         R_UNLESS(!HasMitm(service),                  sm::ResultAlreadyRegistered());
         R_UNLESS(!HasFutureMitmDeclaration(service), sm::ResultAlreadyRegistered());
@@ -870,6 +910,9 @@ namespace ams::sm::impl {
             R_UNLESS(proc != nullptr, sm::ResultInvalidClient());
             R_TRY(ValidateAccessControl(AccessControlEntry(proc->access_control, proc->access_control_size), service, true, false));
         }
+
+        R_UNLESS(!ldr::nexus_routing::IsBackendAlias(ServiceValue(service)),sm::ResultNotAllowed());
+        service=ResolveLoaderService(service);
 
         /* Validate that the service exists. */
         ServiceInfo *service_info = GetServiceInfo(service);
@@ -902,6 +945,9 @@ namespace ams::sm::impl {
             R_UNLESS(proc != nullptr, sm::ResultInvalidClient());
         }
 
+        R_UNLESS(!ldr::nexus_routing::IsBackendAlias(ServiceValue(service)),sm::ResultNotAllowed());
+        service=ResolveLoaderService(service);
+
         /* Validate that the service exists. */
         ServiceInfo *service_info = GetServiceInfo(service);
         R_UNLESS(service_info != nullptr, sm::ResultNotRegistered());
@@ -929,7 +975,7 @@ namespace ams::sm::impl {
         }
 
         /* Undefer requests to the session. */
-        TriggerResume(service);
+        ResumeServiceAndAliases(service);
 
         R_SUCCEED();
     }
@@ -948,7 +994,7 @@ namespace ams::sm::impl {
 
         /* This might undefer some requests. */
         for (const auto &service_name : InitiallyDeferredServices) {
-            TriggerResume(service_name);
+            ResumeServiceAndAliases(service_name);
         }
 
         R_SUCCEED();

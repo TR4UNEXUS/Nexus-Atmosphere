@@ -1,5 +1,16 @@
 # Nexus Atmosphere changes
 
+## 1.12.2 HS3R1 — 21 November 2026 (test)
+
+- Moved Nexus USB game-loading hooks to a separate Loader. The stock Loader remains replaceable by unmodified upstream HOC; both packs use the same Nexus core and USB Loader.
+- Fixed the HS3 boot conflict where two Loaders competed for a single filesystem service session. Nexus owns the native session and serves backend filesystem requests on a dedicated thread.
+- Preserved service access checks, external-code handling, opaque Loader pins and debugger/module queries used by tools such as SaltyNX. Hardware compatibility still needs testing.
+- Added Nexus USB Content 1.3.0 source, its UI dependency and host tests. The revised menu shows drive details and free/used/total space, with safe eject and reconnect. Drive information no longer depends on the eject heartbeat; bottom diagnostics are removed.
+- Retained the N4R2 compressed-read, USB install, mapping-backup and wake-recovery fixes.
+- HOC test pack references unchanged upstream HOC 2.6.1. No-HOC omits HOC. Both require the supplied Hekate Launch setup and include Manager 0.2.24.
+
+Firmware builds and host checks passed. These remain test packs pending full on-console validation.
+
 ## 1.12.2 N4R2 — 20 November 2026
 
 - Fixed compressed game-data reads crossing a full buffer. The shared reader no longer advances past a block, addressing the Silksong launch failure and the same path in other games.
