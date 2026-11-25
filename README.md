@@ -46,6 +46,8 @@ The firmware cross-build, source/binary checks and host regression tests passed.
 
 If Nexus has been useful to you, consider [buying me a coffee](https://www.buymeacoffee.com/TechRepairs4u). Your support gives me more time to build new features and test fixes. Thanks for supporting my work!
 
+<a href="https://www.buymeacoffee.com/TechRepairs4u"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" width="217" height="60"></a>
+
 ## Credits and licence
 
 Built on [AtmosphÃ¨re](https://github.com/Atmosphere-NX/Atmosphere) and the projects credited in its source. See [the upstream README](UPSTREAM-README.md), [LICENSE](LICENSE) and the notices beside third-party components. The overlay's UI libraries retain their own licences. Historical HOC source retains its notices; current HOC is distributed by [Horizon-OC](https://github.com/Horizon-OC/Horizon-OC). Nexus changes and build notes are maintained by TR4UNEXUS.
