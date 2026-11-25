@@ -92,3 +92,7 @@ g++ -std=c++20 -O2 -fsanitize=undefined -I libraries/libstratosphere/include tes
 The archive tests use OpenSSL's host SHA-256 implementation (`libssl-dev` on Debian/Ubuntu) and faulting in-memory filesystem boundaries. They do not write a console or an actual drive. The sleep tests exercise production logic with simulated USB/PSC services; physical recovery remains hardware-dependent. The optional backup diagnostic IPC command does not replace the existing backup/status protocol.
 
 The published tree preserves upstream notices and public build wrappers. Branding resource renames are documented in the existing guide; the firmware binaries were built from the pinned release workspace, not claimed to be byte-identical to a build using this repository's own Git revision.
+
+## NX1 identity
+
+Run `python3 tools/nexus_pack_identity.py --header --check` from the repository root to verify that the compiled identity matches nexus-release.json. The standard and themed editions use this same header.

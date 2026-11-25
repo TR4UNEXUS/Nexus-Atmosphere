@@ -1,3 +1,4 @@
+#include <vapours/nexus_version.h>
 /*
  * Copyright (c) Atmosphère-NX
  *
@@ -121,7 +122,7 @@ namespace ams::kern {
         /* Print out the kernel version. */
         MESOSPHERE_LOG("Horizon Kernel (Mesosphere)\n");
         MESOSPHERE_LOG("Built:                  %s %s\n", __DATE__, __TIME__);
-        MESOSPHERE_LOG("Atmosphere version:     %d.%d.%d-%s\n", ATMOSPHERE_RELEASE_VERSION, ATMOSPHERE_GIT_REVISION);
+        MESOSPHERE_LOG("Atmosphere version:     %d.%d.%d-%s\n", ATMOSPHERE_RELEASE_VERSION, NEXUS_BUILD_REVISION);
         MESOSPHERE_LOG("Target Firmware:        %d.%d.%d\n", (target_fw >> 24) & 0xFF, (target_fw >> 16) & 0xFF, (target_fw >> 8) & 0xFF);
         MESOSPHERE_LOG("Supported OS version:   %d.%d.%d\n", ATMOSPHERE_SUPPORTED_HOS_VERSION_MAJOR, ATMOSPHERE_SUPPORTED_HOS_VERSION_MINOR, ATMOSPHERE_SUPPORTED_HOS_VERSION_MICRO);
         MESOSPHERE_LOG("\n");

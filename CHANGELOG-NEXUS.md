@@ -1,5 +1,9 @@
 # Nexus Atmosphere changes
 
+## 1.12.2 NX1
+
+All three editions share the NX1 version. The firmware and crash reports use this identity. The existing USB sleep/wake recovery and independent loader are included. The packs include Switch Manager 0.2.39 and the colour USB Content overlay.
+
 ## 1.12.2 RF3
 
 - Preserve the successful same-drive sleep/resume path. After a failed wake, restart discovery only after FullAwake acknowledgement and quiescence, revoke old handles, and never replay uncertain writes.

@@ -1,3 +1,4 @@
+#include <vapours/nexus_version.h>
 #include <stratosphere/ncm/ncm_usb_map_write_lease.hpp>
 #include "sd_io_hooks.hpp"
 /*
@@ -99,7 +100,7 @@ namespace ams::mitm::usb_storage {
         constexpr const char *UltrahandNotificationDirectory = "/config/ultrahand/notifications";
         /* R83 also accepts NS patch status from a late generic Loader request
          * when the failing title aborts before its mapped resolver executes. */
-    constexpr const char *BuildId = "NEXUS-1.12.2-RF3-independent-loader";
+    constexpr const char *BuildId = NEXUS_FIRMWARE_BUILD_ID;
         int FormatUsbMetadataOptimizationStatus(char *out, size_t capacity) {
             return util::SNPrintf(out, capacity,
                 "io_metadata_cache=SD9\nio_metadata_cache_slots=64\n"

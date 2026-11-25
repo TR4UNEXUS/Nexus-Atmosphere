@@ -1,15 +1,17 @@
 # Nexus Atmosphere
 
-The complete firmware source for **Nexus Atmosphere 1.12.2 RF3**, including USB storage, game-content routing, the content database and the independent Nexus Loader. This is the source for the RF3 HATS packs, with Switch system version **23.5.0** support.
+The complete firmware source for **Nexus Atmosphere 1.12.2 NX1**, including USB storage, game-content routing, the content database and the independent Nexus Loader. This is the source for the NX1 HATS packs, with Switch system version **23.5.0** support.
 
 ## What's changed
+
+- All three HATS editions identify as NX1. Manager reads the edition and sequence from the pack identity. Firmware crash reports display Nexus-NX1.
 
 - Preserve the successful same-drive sleep/resume path. After a failed wake, restart discovery only after FullAwake acknowledgement and quiescence, revoke old handles, and never replay uncertain writes.
 - Rebuild invalid console routing archives from validated current maps in one checked save transaction. Retain rejected bytes and propagate actual I/O errors.
 - Add optional backup diagnostics, including pending-repair, mount and semantic-map preflight failures; keep the original status/archive ABI.
 - Provide a read-only live USB report snapshot with command submission, completion-wait and report timings. Retain fast failed commands in the bounded recorder too.
 - Retain RF2 Album/hold-R overrides, final USB completion-report recovery, Nextendo-related DNS/mod paths, independent HOC and compressed game-data support.
-- Include Manager 0.2.31 in the three HATS variants. Source is maintained separately.
+- Include Manager 0.2.39 in the three HATS variants. Source is maintained separately.
 
 Host regression checks and cross-builds passed. Physical console and Nextendo online testing remain necessary.
 
@@ -18,7 +20,7 @@ Host regression checks and cross-builds passed. Physical console and Nextendo on
 - [Build instructions](BUILDING.md)
 - [Contributing](CONTRIBUTING.md)
 - [USB integration source](https://github.com/TR4UNEXUS/Nexus-USB-Firmware)
-- [Nexus Manager source](https://github.com/TR4UNEXUS/Nexus-Manager-Source) â€” Manager 0.2.31 is included in the packs; its source is maintained separately.
+- [Nexus Manager source](https://github.com/TR4UNEXUS/Nexus-Manager-Source) â€” Manager 0.2.39 is included in the packs; its source is maintained separately.
 - [Ready-to-use packs](https://github.com/TR4UNEXUS/Nexus-USB-HATS/releases)
 
 | Folder | Purpose |

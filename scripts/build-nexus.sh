@@ -20,6 +20,6 @@ exec make -j"${JOBS:-4}" -f "$makefile" "$target" PYTHON=python3 \
     NEXUS_CORE="$root" ATMOSPHERE_CHECKED_LIBSTRATOSPHERE="$checked" \
     ATMOSPHERE_COMPILER_NAME=gcc ATMOSPHERE_BUILD_NAME=release \
     ATMOSPHERE_BOARD=nx-hac-001 ATMOSPHERE_CPU=arm-cortex-a57 \
-    ATMOSPHERE_GIT_BRANCH=nexus ATMOSPHERE_GIT_REVISION=nexus-1.12.2-rf3 \
+    ATMOSPHERE_GIT_BRANCH=nexus ATMOSPHERE_GIT_REVISION=Nexus-NX1 \
     ATMOSPHERE_GIT_HASH="$hash" \
     ATMOSPHERE_BUILD_SETTINGS='--param=ggc-min-expand=10 --param=ggc-min-heapsize=32768 -fstack-usage'
