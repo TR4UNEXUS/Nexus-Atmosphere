@@ -4,6 +4,8 @@ The complete firmware source for **Nexus Atmosphere 1.12.2 NX1**, including USB 
 
 ## What's changed
 
+- Safe eject releases the temporary USB game archive after closing a title. USB Content 1.3.3 displays distinct notifications for connection, safe eject and unexpected removal. Wait for **Safe to unplug** before disconnecting the drive.
+
 - All three HATS editions identify as NX1. Manager reads the edition and sequence from the pack identity. Firmware crash reports display Nexus-NX1.
 
 - Preserve the successful same-drive sleep/resume path. After a failed wake, restart discovery only after FullAwake acknowledgement and quiescence, revoke old handles, and never replay uncertain writes.
@@ -31,14 +33,14 @@ Host regression checks and cross-builds passed. Physical console and Nextendo on
 | `stratosphere/nexus_loader` | Independent USB-aware Loader and filesystem proxy |
 | `stratosphere/loader` | Original Loader, replaceable by compatible upstream HOC |
 | `stratosphere/sm` | Service routing between the two Loaders |
-| `companions/usb-content-overlay` | Nexus USB Content 1.3.0 source and tests |
+| `companions/usb-content-overlay` | Nexus USB Content 1.3.3 source and tests |
 | `tests/nexus-integration` | Host regression tests |
-| `optional` | Historical combined HOC and HS2 experiments; not used by RF3 |
+| `optional` | Historical combined HOC and HS2 experiments; not used by NX1 |
 | `extras/nexus-sd` | Nintendo DNS blocking configuration |
 
 USB support still spans several Atmosphere modules. Build the core and Nexus Loader from the same checkout. Boot through **Hekate â†’ Launch** with the separate `nexus-loader.kip` entry; launching `fusee.bin` directly does not load that external KIP.
 
-The firmware cross-build, source/binary checks and host regression tests passed. RF3 console testing is still pending. These checks do not guarantee compatibility with every game, drive or system module. No generated firmware, private keys or console data are included here.
+The firmware cross-build, source/binary checks and host regression tests passed. Safe eject after closing a USB game was also confirmed on a Switch. These checks do not guarantee compatibility with every game, drive or system module. No generated firmware, private keys or console data are included here.
 
 **Help building and improving Nexus is welcome.** USB compatibility, game management, performance, build tooling, documentation and testing are all useful areas to contribute. Open an issue with clear reproduction steps or a pull request describing the change and how it was tested.
 

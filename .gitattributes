@@ -12,3 +12,4 @@ emummc/** linguist-vendored
 # Mark fatfs as vendored
 exosphere/mariko_fatal/source/fatfs/** linguist-vendored
 fusee/program/source/fatfs/** linguist-vendored
+*.rgba binary

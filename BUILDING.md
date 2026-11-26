@@ -1,4 +1,4 @@
-# Building Nexus Atmosphere RF3
+# Building Nexus Atmosphere NX1
 
 Use Linux or WSL, Git, Python 3, GNU Make and the devkitPro Switch/ARM toolchains: devkitA64, devkitARM, libnx, deko3d and Switch build tools including uam. The release build used GCC 15.2.0 for both ARM toolchains. Keep SDK headers and libraries from a matching installation; do not reuse objects from another revision.
 
@@ -16,7 +16,7 @@ JOBS=4 sh scripts/build-nexus.sh
 
 The core target builds all required modules, including the separate Nexus Loader. To rebuild just that Loader, use `sh scripts/build-nexus.sh loader`. The wrapper supplies version macros for Git checkouts; output hashes will differ from the original workstation build as build paths, commit IDs and compiler inputs change.
 
-Outputs needed for both variants:
+Core and Loader outputs for all three variants:
 
 - `fusee/out/nintendo_nx_arm_armv4t/release/package3` â†’ `atmosphere/package3`
 - `stratosphere/nexus_loader/out/nintendo_nx_arm64_armv8a/release/nexus_loader.kip` â†’ `atmosphere/kips/nexus-loader.kip`
@@ -27,12 +27,16 @@ Verify the output filename from the build before packaging. A normal Atmosphere 
 
 Both packs use the same core and Nexus Loader. HOC is no longer compiled into the Nexus Loader. The HOC pack adds the unchanged upstream [HOC 2.6.1 release](https://github.com/Horizon-OC/Horizon-OC/releases/tag/2.6.1), with its supporting files. The referenced `dist.zip` SHA-256 is `cd943d0c8f7c8454c1fa85b87a55f6ca3b7a7c78084f37183929bc76c13455a4`.
 
-Use a Hekate Launch entry with these lines alongside your existing emuMMC/sysMMC settings:
+The three NX1 packs load these files through their CFW (emuMMC) and CFW (sysMMC) entries:
 
 ```ini
 pkg3=atmosphere/package3
+pkg3kip1skip=ams_mitm
 kip1=atmosphere/kips/nexus-loader.kip
+kip1=bootloader/nexus-eject/ams-mitm.kip
 ```
+
+The replacement service comes from `stratosphere/ams_mitm/out/nintendo_nx_arm64_armv8a/release/ams_mitm.kip`. Both HOC editions keep their existing HOC and exosphere entries. The stock entry uses its original configuration.
 
 For HOC, also include its supplied files and add:
 
@@ -47,12 +51,18 @@ The original Loader can own HOC's clock patches while Nexus handles USB game loa
 
 ## USB Content overlay
 
+Run the following from the Atmosphere source root:
+
 ```sh
+sh companions/usb-content-overlay/notifications/prepare-library.sh
 make -C companions/usb-content-overlay -j4
 python3 companions/usb-content-overlay/tests/run.py
+python3 tests/nexus-integration/run_hs3_frontend_tests.py
+python3 tests/nexus-integration/run_eject_owner_tests.py
+python3 tests/nexus-integration/run_usb_notification_tests.py
 ```
 
-The UI dependency is included under `companions/horizon-oc-monitor-reference/lib/libultrahand`; unused reference-project include paths have been removed from the public Makefile. It does not depend on HOC at runtime. Copy the resulting `usb-content-status.ovl` to `switch/.overlays/`. See [the companion notes](companions/README.md).
+From `companions/usb-content-overlay/out/`, copy both `switch/` and `config/` to the SD root. All three editions use the four `ams-usb*.rgba` badges under `config/ultrahand/assets/notifications/`. The HATS packs supply Ultrahand 2.5.4, its notification sound and the enabled notification defaults. The user's Ultrahand mute setting applies.
 
 ## Other pack components
 
@@ -75,11 +85,11 @@ python3 tests/nexus-integration/run_db2_paged_tests.py
 python3 tests/nexus-integration/run_usb_sleep_tests.py --out build/host-tests/sleep
 ```
 
-The new tests exercise production service methods with instrumented backends, including opaque pin ownership, error propagation, module queries, service aliases and a single filesystem session. They do not reproduce Horizon scheduling, physical USB removal, suspend/resume or every system-module combination. RF3 still needs console validation; host checks do not establish compatibility with every game, USB device or system module.
+The new tests exercise production service methods with instrumented backends, including opaque pin ownership, error propagation, module queries, service aliases and a single filesystem session. They do not reproduce Horizon scheduling, physical USB removal, suspend/resume or every system-module combination. Safe eject after closing a game was tested on a Switch.
 
-## RF3 validation and themed appearance
+## Regression checks and themed appearance
 
-The standard source retains the original Atmosphere splash. For the Nexus-themed appearance, copy the files under `variants/nexus-themed/` over the source root before building. This uses the checked compressed splash implementation; retain `boot_splash_zstd.inc` from the root source. HOC remains a separate external component.
+The standard source retains the original Atmosphere splash. For the Nexus-themed appearance, copy the files under `variants/nexus-themed/` over the source root before building. The themed boot module decodes its embedded Nexus JPEG into the display framebuffer with TJpgDec. Keep Hekate’s CFW launch splash setting as supplied in the themed pack. HOC remains a separate external component.
 
 ```sh
 python3 tests/nexus-integration/run_homebrew_override_tests.py
