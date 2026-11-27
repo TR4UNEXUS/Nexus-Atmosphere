@@ -154,6 +154,13 @@ namespace ams::usb::storage {
     }
 
     Result Service::CaptureRetainedInterface(host::Interface *out, u64 deadline) {
+        if (m_device.IsNbd()) {
+            /* No USB interface: identity across sleep is proven by the export
+             * size, the sector fingerprints and the sleep marker instead. */
+            *out = {};
+            out->inf.ID = m_device.GetInterfaceId();
+            R_SUCCEED();
+        }
         for (;;) {
             s32 count = 0;
             const auto rc=m_client.QueryAcquiredInterfaces(m_acquired_interfaces,sizeof(m_acquired_interfaces),&count);
@@ -507,10 +514,12 @@ namespace ams::usb::storage {
             if (m_sleep_had_media) {
                 bool retained = false;
                 const u64 now = impl::UsbNowNs();
-                const auto probe_deadline = sleep::Deadline(now, sleep::ProbeBudgetNs);
+                /* NBD: the network can take several seconds to come back after wake. */
+                const auto probe_deadline = sleep::Deadline(now, m_device.IsNbd()
+                    ? static_cast<u64>(nbd::GetConfig().reconnect_ms) * 1'000'000ULL : sleep::ProbeBudgetNs);
                 const auto lookup_deadline = m_sleep_marker_armed ? sleep::Deadline(now, 500'000'000ULL) : probe_deadline;
                 Result previous = usb::ResultMediaChanged();
-                if (m_device.IsInitialized() && m_client.IsInitialized()) {
+                if (m_device.IsInitialized() && (m_client.IsInitialized() || m_device.IsNbd())) {
                     host::Interface current{};
                     previous = CaptureRetainedInterface(&current, lookup_deadline);
                     if (usb::ResultInternalStateError::Includes(previous)) R_RETURN(previous);
@@ -544,7 +553,8 @@ namespace ams::usb::storage {
                     }
                 }
                 if (!retained) {
-                    if (!m_sleep_marker_armed) R_RETURN(previous);
+                    /* USB rebind needs usb:hs; for NBD the reconnect already ran inside the fingerprint reads. */
+                    if (!m_sleep_marker_armed || m_device.IsNbd()) R_RETURN(previous);
                     Status saved{};
                     R_TRY(GetStatus(&saved));
                     R_UNLESS(saved.state == State::Ready && saved.media_generation == m_sleep_generation, usb::ResultMediaChanged());
@@ -1333,7 +1343,11 @@ namespace ams::usb::storage {
         // After all filesystem finalization writes, before releasing transport.
         if(!step(eject::Stage::DeviceCache,[&](){return m_device.SynchronizeCacheForEject();})) return true;
         if(!step(eject::Stage::DeviceRelease,[&](){return m_device.Finalize();})) return true;
-        if(!step(eject::Stage::HostRelease,[&](){return m_client.Finalize();})) return true;
+        if(!step(eject::Stage::HostRelease,[&]() -> Result {
+            /* NBD mode never opens usb:hs. USB mode keeps the original behaviour. */
+            if (nbd::IsEnabled() && !m_client.IsInitialized()) R_SUCCEED();
+            R_RETURN(m_client.Finalize());
+        })) return true;
         this->AdvanceMediaGeneration();
         {
             std::scoped_lock lk(m_mutex);
@@ -1386,7 +1400,112 @@ namespace ams::usb::storage {
         }
     }
 
+    void Service::NbdWorkerThread() {
+        /* Network block device mode: same mount, status and sleep logic as USB,
+         * without usb:hs discovery. The Device emulates SCSI over NBD. */
+        constexpr u64 ConnectBudgetNs = 5'000'000'000ULL;
+        while (!this->ShouldStop()) {
+            const auto admission = BeginSystemOperation();
+            if (R_FAILED(admission)) {
+                if (this->ShouldStop()) break;
+                os::SleepThread(WorkerPollInterval); continue;
+            }
+            ON_SCOPE_EXIT { EndSystemOperation(); };
+            if (this->ProcessEject()) { os::SleepThread(WorkerPollInterval); continue; }
+            if (this->ConsumeReconnectRequest()) {
+                this->Disconnect();
+                this->SetState(State::Starting, ResultSuccess());
+            }
+            if (m_device.IsInitialized()) {
+                TryArmSleepCheckpoint();
+                this->RunIdleKeepAlive();
+                os::SleepThread(WorkerPollInterval);
+                continue;
+            }
+
+            this->SetState(State::Mounting, ResultSuccess());
+            mass_storage::LunProbeInfo probe{};
+            /* Connect without the volume lock: while the server is unreachable,
+             * filesystem callers must get "no media" at once, not wait here. */
+            Result rc = m_device.ConnectNbd(impl::UsbNowNs() + ConnectBudgetNs);
+            if (R_SUCCEEDED(rc)) {
+                std::scoped_lock lk(m_volume_mutex);
+                rc = m_device.InitializeNbd(std::addressof(probe), impl::UsbNowNs() + ConnectBudgetNs);
+            }
+            this->SetProbeResult(ProbeStage::DeviceInitialize, rc, 1);
+            if (R_FAILED(rc)) {
+                /* Server or network not reachable yet: keep waiting like an unplugged drive. */
+                this->SetWaiting(rc);
+                os::SleepThread(TimeSpan::FromSeconds(2));
+                continue;
+            }
+            this->AdvanceMediaGeneration();
+
+            mass_storage::InquiryData inquiry{};
+            size_t partition_count = 0;
+            size_t partition_index = 0;
+            FileSystemType filesystem_type = FileSystemType::Unknown;
+            {
+                std::scoped_lock lk(m_volume_mutex);
+                rc = m_device.GetInquiry(std::addressof(inquiry));
+                this->SetProbeResult(ProbeStage::GetInquiry, rc, 1);
+                if (R_SUCCEEDED(rc)) {
+                    rc = volume::DiscoverPartitions(std::addressof(m_device), m_partitions, util::size(m_partitions), std::addressof(partition_count));
+                    if (R_SUCCEEDED(rc) && partition_count == 0) rc = usb::ResultFileNotFound();
+                    this->SetProbeResult(ProbeStage::DiscoverPartitions, rc, 1);
+                }
+                if (R_SUCCEEDED(rc)) {
+                    rc = usb::ResultUnsupportedFilesystem();
+                    const size_t count = std::min<size_t>(partition_count, util::size(m_partitions));
+                    for (size_t i = 0; i < count && R_FAILED(rc); ++i) {
+                        rc = m_fat32_volume.Initialize(std::addressof(m_device), m_partitions[i]);
+                        this->SetProbeResult(ProbeStage::Fat32Mount, rc, 1);
+                        if (R_SUCCEEDED(rc)) { partition_index = i; filesystem_type = FileSystemType::Fat32; break; }
+                        rc = m_exfat_volume.Initialize(std::addressof(m_device), m_partitions[i]);
+                        this->SetProbeResult(ProbeStage::ExFatMount, rc, 1);
+                        if (R_SUCCEEDED(rc)) { partition_index = i; filesystem_type = FileSystemType::ExFat; break; }
+                    }
+                }
+                if (R_SUCCEEDED(rc)) {
+                    m_filesystem_type = filesystem_type;
+                    if (m_read_only) {
+                        m_writable_ready = false;
+                    } else {
+                        const auto writable_result = m_writable_volume.Initialize(std::addressof(m_device), m_partitions[partition_index]);
+                        this->SetProbeResult(ProbeStage::WritableMount, writable_result, 1);
+                        m_writable_ready = R_SUCCEEDED(writable_result);
+                    }
+                }
+            }
+            if (R_FAILED(rc)) {
+                this->Disconnect();
+                this->SetState(State::Error, rc);
+                os::SleepThread(TimeSpan::FromSeconds(5));
+                continue;
+            }
+            {
+                std::scoped_lock volume_lk(m_volume_mutex);
+                m_checkpoint_valid = false;
+                if (m_game_read_cache) m_game_read_cache->Clear();
+                m_checkpoint_pending = m_writable_ready && !m_skip_checkpoint_on_next_mount;
+                m_skip_checkpoint_on_next_mount = false;
+                this->SetReady(m_device.GetGeometry(), inquiry, m_partitions[partition_index], filesystem_type, partition_index,
+                               partition_count, m_device.GetInterfaceId(), 0, m_writable_ready);
+            }
+            TryArmSleepCheckpoint();
+            os::SleepThread(WorkerPollInterval);
+        }
+
+        { std::unique_lock lk(m_power_mutex);
+          while (m_resume_in_progress) m_power_cv.Wait(m_power_mutex); }
+        this->Disconnect();
+    }
+
     void Service::WorkerThread() {
+        if (nbd::IsEnabled()) {
+            this->NbdWorkerThread();
+            return;
+        }
         host::InterfaceFilter filter{};
         mass_storage::MakeInterfaceFilter(std::addressof(filter));
         impl::StartupProbeBackoff startup_backoff;
@@ -2095,6 +2214,7 @@ namespace ams::usb::storage {
     Result Service::ControlHostWriteTest(NexusUsbHostWriteStatus *, u64, const NexusUsbHostWriteRequest &) { R_THROW(usb::ResultOperationDenied()); }
     bool Service::ProcessEject() { return false; }
     void Service::WorkerThread() { }
+    void Service::NbdWorkerThread() { }
     bool Service::ShouldStop() const { return true; }
     void Service::SetState(State, Result) { }
     void Service::SetWaiting(Result) { }

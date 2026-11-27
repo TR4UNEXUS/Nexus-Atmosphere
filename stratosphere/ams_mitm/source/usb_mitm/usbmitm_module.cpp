@@ -3870,6 +3870,31 @@ namespace ams::mitm::usb_storage {
 
         #include "usb_eject_commands.hpp"
 
+        /* Optional network block device mode: sdmc:/atmosphere/config/nexus-nbd.ini.
+         * Read once, before the storage worker first starts. A missing or invalid
+         * file keeps the normal USB behaviour. */
+        constinit bool g_nbd_config_loaded = false;
+        constinit os::SdkMutex g_nbd_config_mutex;
+        void LoadNbdConfigOnce() {
+            /* Held only for one short SD read; Configure() completes before any caller proceeds. */
+            std::scoped_lock lk(g_nbd_config_mutex);
+            if (g_nbd_config_loaded) return;
+            /* Never wait here: callers may hold locks. Before the SD is mounted a
+             * missing file proves nothing, so just try again on the next call. */
+            if (!mitm::IsInitialized()) return;
+            g_nbd_config_loaded = true;
+            FsFile file{};
+            if (R_FAILED(mitm::fs::OpenAtmosphereSdFile(std::addressof(file), "/config/nexus-nbd.ini", ams::fs::OpenMode_Read))) return;
+            ON_SCOPE_EXIT { static_cast<void>(fsFileClose(std::addressof(file))); };
+            char text[1024]{};
+            u64 read = 0;
+            if (R_FAILED(fsFileRead(std::addressof(file), 0, text, sizeof(text) - 1, FsReadOption_None, std::addressof(read)))) return;
+            ams::usb::nbd::Config config{};
+            if (ams::usb::nbd::ParseConfig(std::addressof(config), text, static_cast<size_t>(read)) && config.enabled) {
+                ams::usb::nbd::Configure(config);
+            }
+        }
+
         Result EnsureUsbStarted() {
             const ams::usb::pause_diagnostics::Scope pause(ams::usb::pause_diagnostics::Stage::StartupGate);
             R_UNLESS(IsEnabled(), usb::ResultOperationDenied());
@@ -3881,6 +3906,7 @@ namespace ams::mitm::usb_storage {
                 R_SUCCEED();
             }
 
+            LoadNbdConfigOnce();
             const auto start_result = g_storage_service.Start();
             if (R_FAILED(start_result)) {
                 g_last_module_result = static_cast<Result>(start_result).GetValue();
@@ -5601,6 +5627,7 @@ namespace ams::mitm::usb_storage {
 
         /* Wait until the SD and settings overlay are ready. */
         mitm::WaitInitialized();
+        LoadNbdConfigOnce();
 
         /* The optional usb-content KIP is the sole ams:usb provider when
          * explicitly selected. Do not register a second provider or acquire

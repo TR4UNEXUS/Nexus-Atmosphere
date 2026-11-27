@@ -470,6 +470,11 @@ namespace ams::usb::mass_storage {
 
     Result Device::Finalize() {
         R_UNLESS(m_is_initialized, usb::ResultNotInitialized());
+        if (m_transport == Transport::Nbd) {
+            m_nbd.Disconnect();
+            m_nbd_sense_key = 0;
+            m_nbd_sense_asc = 0;
+        }
         io_diagnostics::protocol.store(0);
         io_diagnostics::bulk_in_packet.store(0);
         io_diagnostics::bulk_out_packet.store(0);
@@ -1010,6 +1015,12 @@ namespace ams::usb::mass_storage {
     Result Device::KeepAlive() {
         R_UNLESS(m_is_initialized, usb::ResultNotInitialized());
         R_UNLESS(!m_keep_alive_failed, usb::ResultNotInitialized());
+        if (m_transport == Transport::Nbd) {
+            /* Nothing to keep awake. A short network drop while idle must not
+             * remount the library: the next real I/O reconnects instead. */
+            io_diagnostics::last_command_ns.store(impl::UsbNowNs(), std::memory_order_relaxed);
+            R_SUCCEED();
+        }
         R_UNLESS(IsValidBlockSize(m_geometry.block_size) && m_geometry.block_count > 0, usb::ResultInvalidParameter());
         /* Read a single sector directly, bypassing all filesystem caches.
          * No writes, MODE SELECT, ATA passthrough, eject lock or persistent
@@ -1086,6 +1097,15 @@ namespace ams::usb::mass_storage {
         completion_diagnostics::CommandScope completion_timer(data_size, command[0], NEXUS_USB_COMPLETION_SOURCE_COMMAND, command, command_size);
         io_diagnostics::last_command_ns.store(impl::UsbNowNs(), std::memory_order_relaxed);
         const auto command_result = [&]() -> Result {
+
+        if (m_transport == Transport::Nbd) {
+            /* Reconnection already happened inside the NBD path. A failure that
+             * is not a reported SCSI error means the server stayed unreachable:
+             * let the storage worker release and remount, like UAS. */
+            const auto result = this->ExecuteCommandOnce(command, command_size, direction, data, data_size, out_transferred_size);
+            if (R_FAILED(result) && !usb::ResultScsiCommandFailed::Includes(result)) this->Quarantine();
+            R_RETURN(result);
+        }
 
         if (m_transport == Transport::Uas) {
             /* UAS has no BOT reset-recovery sequence. Let the storage worker
@@ -1181,6 +1201,9 @@ namespace ams::usb::mass_storage {
         if (m_system_power_deadline && (!deadline_ns || m_system_power_deadline < deadline_ns)) deadline_ns=m_system_power_deadline;
         R_UNLESS(!deadline_ns || impl::UsbNowNs() < deadline_ns,usb::ResultResourceBusy());
         if (direction==DataDirection::Out) m_unsynchronized_writes=true;
+        if (m_transport == Transport::Nbd) {
+            R_RETURN(this->ExecuteNbdCommand(command, command_size, direction, data, data_size, out_transferred_size, deadline_ns));
+        }
 
         auto *cbw = reinterpret_cast<CommandBlockWrapper *>(m_command_buffer);
         auto *csw = reinterpret_cast<CommandStatusWrapper *>(m_status_buffer);
@@ -1471,6 +1494,168 @@ namespace ams::usb::mass_storage {
         }
         R_UNLESS(status_iu->status == CswStatusPassed, usb::ResultTransactionError());
         R_SUCCEED();
+    }
+
+    Result Device::ConnectNbd(u64 deadline_ns) {
+        R_UNLESS(!m_is_initialized, usb::ResultAlreadyInitialized());
+        R_UNLESS(nbd::IsEnabled(), usb::ResultOperationDenied());
+        if (m_nbd.IsOpen()) R_SUCCEED();
+        R_RETURN(m_nbd.Open(nbd::GetConfig(), deadline_ns));
+    }
+
+    Result Device::InitializeNbd(LunProbeInfo *probe, u64 deadline_ns) {
+        R_UNLESS(!m_is_initialized, usb::ResultAlreadyInitialized());
+        R_UNLESS(nbd::IsEnabled(), usb::ResultOperationDenied());
+        if (probe) *probe = {};
+        command_health::media_ready.store(false);
+        const Result rc = m_nbd.IsOpen() ? static_cast<Result>(ResultSuccess()) : m_nbd.Open(nbd::GetConfig(), deadline_ns);
+        if (R_FAILED(rc)) {
+            if (probe) probe->transport_failed = true;
+            R_RETURN(rc);
+        }
+        m_transport = Transport::Nbd;
+        m_lun = 0;
+        m_tag = 0;
+        m_geometry.block_count = m_nbd.GetSize() / nbd::BlockSize;
+        m_geometry.block_size = nbd::BlockSize;
+        m_nbd_sense_key = 0;
+        m_nbd_sense_asc = 0;
+        m_keep_alive_failed = false;
+        m_wake_read_only = false;
+        m_unsynchronized_writes = false;
+        m_system_power_deadline = 0;
+        m_is_initialized = true;
+        R_SUCCEED();
+    }
+
+    Result Device::NbdTransfer(bool write, u64 lba, u32 blocks, void *data, u32 data_size, u64 deadline_ns) {
+        R_UNLESS(blocks > 0 && data != nullptr && data_size == static_cast<u64>(blocks) * nbd::BlockSize, usb::ResultInvalidParameter());
+        R_UNLESS(lba < m_geometry.block_count && blocks <= m_geometry.block_count - lba, usb::ResultInvalidParameter());
+        /* Wait at most reconnect_ms (or the sleep/wake deadline) for the server to come back. */
+        const u64 limit = deadline_ns ? deadline_ns : impl::UsbNowNs() + static_cast<u64>(nbd::GetConfig().reconnect_ms) * 1'000'000ULL;
+        for (;;) {
+            if (!m_nbd.IsOpen()) {
+                nbd::diagnostics::reconnects.fetch_add(1);
+                R_TRY(m_nbd.Open(nbd::GetConfig(), limit));
+                if (m_nbd.GetSize() != m_geometry.block_count * nbd::BlockSize) {
+                    /* Another export (or a resized image) behind the same address. */
+                    m_nbd.Close();
+                    R_THROW(usb::ResultMediaChanged());
+                }
+            }
+            const u64 offset = lba * nbd::BlockSize;
+            const auto rc = write ? m_nbd.Write(offset, data, data_size) : m_nbd.Read(offset, data, data_size);
+            if (R_SUCCEEDED(rc)) R_SUCCEED();
+            if (usb::ResultOperationDenied::Includes(rc)) {
+                m_nbd_sense_key = 0x07; m_nbd_sense_asc = 0x27; /* DATA PROTECT / write protected */
+                R_THROW(usb::ResultScsiCommandFailed());
+            }
+            if (usb::ResultScsiCommandFailed::Includes(rc)) {
+                m_nbd_sense_key = 0x03; m_nbd_sense_asc = write ? 0x0C : 0x11; /* MEDIUM ERROR */
+                R_RETURN(rc);
+            }
+            /* The connection dropped. Reads and writes are idempotent: replay on a new one. */
+            R_UNLESS(impl::UsbNowNs() < limit, rc);
+        }
+    }
+
+    Result Device::ExecuteNbdCommand(const u8 *command, size_t command_size, DataDirection direction, void *data, u32 data_size, u32 *out_transferred_size, u64 deadline_ns) {
+        R_UNLESS(command != nullptr && command_size > 0 && out_transferred_size != nullptr, usb::ResultInvalidParameter());
+        *out_transferred_size = 0;
+        u8 *bytes = static_cast<u8 *>(data);
+        const auto fail = [&](u8 key, u8 asc) -> Result {
+            m_nbd_sense_key = key;
+            m_nbd_sense_asc = asc;
+            R_THROW(usb::ResultScsiCommandFailed());
+        };
+        switch (command[0]) {
+            case ScsiTestUnitReady:
+            case 0x1B: /* START STOP UNIT */
+            case 0x1E: /* PREVENT ALLOW MEDIUM REMOVAL */
+                R_SUCCEED();
+            case ScsiRequestSense: {
+                R_UNLESS(direction == DataDirection::In && bytes != nullptr, usb::ResultInvalidParameter());
+                u8 sense[18]{};
+                sense[0] = 0x70;
+                sense[2] = m_nbd_sense_key;
+                sense[7] = 10;
+                sense[12] = m_nbd_sense_asc;
+                const u32 n = std::min<u32>(data_size, sizeof(sense));
+                std::memcpy(bytes, sense, n);
+                *out_transferred_size = n;
+                m_nbd_sense_key = 0;
+                m_nbd_sense_asc = 0;
+                R_SUCCEED();
+            }
+            case ScsiInquiry: {
+                R_UNLESS(direction == DataDirection::In && bytes != nullptr, usb::ResultInvalidParameter());
+                u8 inquiry[InquiryDataSize]{};
+                inquiry[0] = 0x00;      /* direct-access block device */
+                inquiry[1] = 0x80;      /* removable, like a USB drive */
+                inquiry[2] = 0x06;
+                inquiry[3] = 0x02;
+                inquiry[4] = InquiryDataSize - 5;
+                std::memcpy(inquiry + 8,  "NBD     ", 8);
+                std::memcpy(inquiry + 16, "Nexus Network   ", 16);
+                std::memcpy(inquiry + 32, "0001", 4);
+                const u32 n = std::min<u32>(data_size, sizeof(inquiry));
+                std::memcpy(bytes, inquiry, n);
+                *out_transferred_size = n;
+                R_SUCCEED();
+            }
+            case ScsiReadCapacity10: {
+                R_UNLESS(direction == DataDirection::In && bytes != nullptr && data_size >= 8, usb::ResultInvalidParameter());
+                const u64 last = m_geometry.block_count - 1;
+                StoreBigEndian32(bytes, last > UINT32_MAX ? UINT32_MAX : static_cast<u32>(last));
+                StoreBigEndian32(bytes + 4, nbd::BlockSize);
+                *out_transferred_size = 8;
+                R_SUCCEED();
+            }
+            case ScsiServiceActionIn: {
+                if (command_size < 16 || (command[1] & 0x1F) != ScsiReadCapacity16) return fail(0x05, 0x24);
+                R_UNLESS(direction == DataDirection::In && bytes != nullptr && data_size >= 12, usb::ResultInvalidParameter());
+                std::memset(bytes, 0, data_size);
+                StoreBigEndian64(bytes, m_geometry.block_count - 1);
+                StoreBigEndian32(bytes + 8, nbd::BlockSize);
+                *out_transferred_size = std::min<u32>(data_size, 32);
+                R_SUCCEED();
+            }
+            case ScsiRead10:
+            case ScsiRead16:
+            case ScsiWrite10:
+            case ScsiWrite16: {
+                const bool write = command[0] == ScsiWrite10 || command[0] == ScsiWrite16;
+                const bool cdb16 = command[0] == ScsiRead16 || command[0] == ScsiWrite16;
+                R_UNLESS(command_size >= (cdb16 ? 16u : 10u), usb::ResultInvalidParameter());
+                R_UNLESS(direction == (write ? DataDirection::Out : DataDirection::In), usb::ResultInvalidParameter());
+                const u64 lba = cdb16 ? LoadBigEndian64(command + 2) : LoadBigEndian32(command + 2);
+                const u32 blocks = cdb16 ? LoadBigEndian32(command + 10) : LoadBigEndian16(command + 7);
+                if (blocks == 0) R_SUCCEED();
+                R_TRY(this->NbdTransfer(write, lba, blocks, data, data_size, deadline_ns));
+                *out_transferred_size = data_size;
+                R_SUCCEED();
+            }
+            case 0x35: /* SYNCHRONIZE CACHE(10) */
+            case 0x91: /* SYNCHRONIZE CACHE(16) */ {
+                const u64 limit = deadline_ns ? deadline_ns : impl::UsbNowNs() + static_cast<u64>(nbd::GetConfig().reconnect_ms) * 1'000'000ULL;
+                for (;;) {
+                    if (!m_nbd.IsOpen()) {
+                        nbd::diagnostics::reconnects.fetch_add(1);
+                        R_TRY(m_nbd.Open(nbd::GetConfig(), limit));
+                    }
+                    const auto rc = m_nbd.Flush();
+                    if (R_SUCCEEDED(rc)) {
+                        m_unsynchronized_writes = false;
+                        R_SUCCEED();
+                    }
+                    if (usb::ResultScsiCommandFailed::Includes(rc)) return fail(0x03, 0x0C);
+                    R_UNLESS(impl::UsbNowNs() < limit, rc);
+                }
+            }
+            default:
+                /* ILLEGAL REQUEST / INVALID COMMAND OPERATION CODE */
+                return fail(0x05, 0x20);
+        }
     }
 
     void Device::StoreBigEndian16(u8 *dst, u16 value) {
