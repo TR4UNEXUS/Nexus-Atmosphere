@@ -207,6 +207,7 @@ namespace ams::usb::storage {
             Result RebindAfterSleep(const Status &saved, u64 deadline);
             void InvalidateFailedWake(Result result);
             void WorkerThread();
+            void NbdWorkerThread();
             bool ProcessEject(); // Worker only. Never called from FS/launch IPC.
             void RunIdleKeepAlive();
             bool ShouldStop() const;

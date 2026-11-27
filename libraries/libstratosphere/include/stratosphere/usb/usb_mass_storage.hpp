@@ -18,6 +18,7 @@
 #include <vapours.hpp>
 #include <stratosphere/usb/usb_host.hpp>
 #include <stratosphere/usb/usb_sleep_core.hpp>
+#include <stratosphere/usb/usb_nbd.hpp>
 
 namespace ams::usb::mass_storage {
 
@@ -81,6 +82,7 @@ namespace ams::usb::mass_storage {
             enum class Transport : u8 {
                 Bot,
                 Uas,
+                Nbd,    /* network block device: SCSI commands are emulated over NBD */
             };
 
             host::InterfaceSession m_interface;
@@ -98,6 +100,9 @@ namespace ams::usb::mass_storage {
             u8 m_bulk_out_endpoint_address{0};
             u8 m_lun{0};
             u32 m_tag{0};
+            nbd::Connection m_nbd{};
+            u8 m_nbd_sense_key{0};
+            u8 m_nbd_sense_asc{0};
             Geometry m_geometry{};
             u64 m_system_power_deadline{};
             bool m_unsynchronized_writes{};
@@ -118,6 +123,13 @@ namespace ams::usb::mass_storage {
             Result Initialize(host::Client *client, host::Interface *interface, u8 lun, LunProbeInfo *probe, bool reset_before_probe, bool reselect_interface);
             Result Finalize();
             Result InitializeForWake(host::Client *client, host::Interface *interface, u8 lun, u64 deadline);
+            /* Open the configured NBD export instead of a USB interface.
+             * ConnectNbd may run without the volume lock (it only touches the
+             * connection of an uninitialized Device); InitializeNbd then
+             * publishes the device and must run under the volume lock. */
+            Result ConnectNbd(u64 deadline_ns);
+            Result InitializeNbd(LunProbeInfo *probe, u64 deadline_ns);
+            bool IsNbd() const { return m_is_initialized && m_transport == Transport::Nbd; }
             Result CaptureWakeSerial(u8 out_digest[32], u8 descriptor_index, u64 deadline);
             void SetWakeReadOnly(bool read_only) { m_wake_read_only = read_only; }
 
@@ -127,7 +139,9 @@ namespace ams::usb::mass_storage {
             void Quarantine() { m_keep_alive_failed = true; }
             bool IsQuarantined() const { return m_keep_alive_failed; }
             u8 GetLun() const { return m_lun; }
-            s32 GetInterfaceId() const { return m_interface.GetId(); }
+            /* NBD has no USB interface; a fixed id keeps the worker's identity checks stable. */
+            static constexpr s32 NbdInterfaceId = 0x4E4244;
+            s32 GetInterfaceId() const { return m_transport == Transport::Nbd ? NbdInterfaceId : m_interface.GetId(); }
             const Geometry &GetGeometry() const { return m_geometry; }
 
             Result TestUnitReady();
@@ -163,6 +177,8 @@ namespace ams::usb::mass_storage {
             Result ExecuteCommand(const u8 *command, size_t command_size, DataDirection direction, void *data, u32 data_size, u32 *out_transferred_size);
             Result ExecuteCommandOnce(const u8 *command, size_t command_size, DataDirection direction, void *data, u32 data_size, u32 *out_transferred_size, u64 deadline_ns = 0, bool *startup_csw_recovery_used = nullptr);
             Result ExecuteCommandUasOnce(const u8 *command, size_t command_size, DataDirection direction, void *data, u32 data_size, u32 *out_transferred_size, u64 deadline_ns = 0, u32 *wake_sense_size = nullptr);
+            Result ExecuteNbdCommand(const u8 *command, size_t command_size, DataDirection direction, void *data, u32 data_size, u32 *out_transferred_size, u64 deadline_ns);
+            Result NbdTransfer(bool write, u64 lba, u32 blocks, void *data, u32 data_size, u64 deadline_ns);
 
             static void StoreBigEndian16(u8 *dst, u16 value);
             static void StoreBigEndian32(u8 *dst, u32 value);
